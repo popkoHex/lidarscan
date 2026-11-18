@@ -1,0 +1,69 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: XcodeGen installeren
+        run: brew install xcodegen
+
+      - name: Xcode-project genereren
+        run: xcodegen generate
+
+      - name: App bouwen (zonder ondertekening)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project LidarScan.xcodeproj \
+            -scheme LidarScan \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: IPA maken
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/LidarScan.app Payload/
+          zip -qr LidarScan.ipa Payload
+
+      - name: IPA uploaden (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LidarScan-ipa
+          path: LidarScan.ipa
+
+      - name: Release publiceren (vaste downloadlink)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: LiDAR Scan – build ${{ github.run_number }}
+          body: Download LidarScan.ipa en open hem in SideStore.
+          files: LidarScan.ipa
+          make_latest: true
+
+      - name: Foutmeldingen tonen
+        if: failure()
+        run: grep -E "error:|warning: .*will be an error" build.log | head -50 || true
+
+      - name: Bouwlog uploaden (bij fouten)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
