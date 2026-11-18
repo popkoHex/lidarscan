@@ -19,6 +19,7 @@ final class CaptureModel: ObservableObject {
     private var workDir: URL?
     private var stateTask: Task<Void, Never>?
     private var passTask: Task<Void, Never>?
+    private var lastStateKey = ""
 
     var isSupported: Bool { ObjectCaptureSession.isSupported }
 
@@ -44,31 +45,40 @@ final class CaptureModel: ObservableObject {
         message = ""
 
         let s = ObjectCaptureSession()
-        var config = ObjectCaptureSession.Configuration()
-        config.checkpointDirectory = checkpoints
-        do {
-            try s.start(imagesDirectory: images, configuration: config)
-        } catch {
-            message = "Starten mislukt: \(error.localizedDescription)"
-            return
-        }
         session = s
         step = .initializing
-
+        lastStateKey = ""
         passCompleted = false
         passCount = 1
+
+        // Eerst luisteren, dan pas starten (anders kan de 'klaar'-melding gemist worden)
         stateTask?.cancel()
         stateTask = Task { [weak self] in
             for await state in s.stateUpdates {
                 self?.handle(state)
             }
         }
+
+        var config = ObjectCaptureSession.Configuration()
+        config.checkpointDirectory = checkpoints
+        do {
+            try s.start(imagesDirectory: images, configuration: config)
+        } catch {
+            message = "Starten mislukt: \(error.localizedDescription)"
+            session = nil
+            step = .idle
+            return
+        }
+
         // Houdt bij of een volledige rondgang klaar is
         passTask?.cancel()
         passTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 guard let self, let session = self.session else { break }
+                // Reserve: status ook zelf uitlezen, voor het geval een melding gemist is
+                self.handle(session.state)
+                guard self.session != nil else { break }
                 let done = session.userCompletedScanPass
                 if done != self.passCompleted {
                     self.passCompleted = done
@@ -78,7 +88,23 @@ final class CaptureModel: ObservableObject {
         }
     }
 
+    private static func key(_ state: ObjectCaptureSession.CaptureState) -> String {
+        switch state {
+        case .initializing: return "initializing"
+        case .ready: return "ready"
+        case .detecting: return "detecting"
+        case .capturing: return "capturing"
+        case .finishing: return "finishing"
+        case .completed: return "completed"
+        case .failed: return "failed"
+        @unknown default: return "unknown"
+        }
+    }
+
     private func handle(_ state: ObjectCaptureSession.CaptureState) {
+        let k = Self.key(state)
+        guard k != lastStateKey else { return }
+        lastStateKey = k
         switch state {
         case .initializing: step = .initializing
         case .ready: step = .ready
@@ -242,8 +268,22 @@ struct ObjectCaptureScreen: View {
                     PillButton(title: "Nu al klaar", systemImage: "checkmark.circle", tint: .green) { m.finish() }
                 }
             }
-        case .finishing, .initializing:
-            ProgressView()
+        case .initializing:
+            VStack(spacing: 8) {
+                ProgressView()
+                Text("Beweeg je telefoon rustig een beetje heen en weer, richting het object…")
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        case .finishing:
+            VStack(spacing: 8) {
+                ProgressView()
+                Text("Foto’s worden afgerond…").font(.footnote)
+            }
+            .padding(10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
         default:
             EmptyView()
         }
